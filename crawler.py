@@ -6,8 +6,10 @@ from asyncio.locks import Semaphore
 from typing import Tuple, TypedDict
 
 import aiohttp
+import aiosqlite
 import uvloop
 from aiohttp.client_exceptions import ClientResponseError
+from aiosqlite.core import Connection
 from rapidjson import dumps, loads
 
 uvloop.install()
@@ -26,7 +28,6 @@ HEADERS = {
 }
 
 chunk_size = 100
-frequency = 20
 
 
 class Medal(TypedDict):
@@ -85,45 +86,73 @@ async def get_medal(sem: Semaphore, session: aiohttp.ClientSession, rid: int) ->
     return None
 
 
-async def save_result(result):
+async def save_result(db: Connection, result: Medal):
     if isinstance(result, dict):
         print(f'room_id: {result["room_id"]}, medal: {result["medal_name"]}')
-    else:
-        print(result)
+        await db.execute(
+            "INSERT OR IGNORE INTO medals VALUES (?, ?, ?, ?)",
+            (
+                result["room_id"],
+                result["short_id"],
+                result["uid"],
+                result["medal_name"],
+            ),
+        )
+    # else:
+    #     print(result)
 
 
-async def main(from_rid: int, to_rid: int):
-    TTL = 0
-    sem = asyncio.Semaphore(frequency)
-    async with aiohttp.ClientSession(json_serialize=dumps, headers=HEADERS) as session:
-        total_num = to_rid - from_rid + 1
-        chunk_num = math.ceil(total_num / chunk_size)
-        chunk = 0
-        while chunk < chunk_num:
-            for rid in range(from_rid + chunk, to_rid + 1, chunk_num):
-                asyncio.create_task(get_medal(sem, session, rid))
-                print(rid)
-            results = await asyncio.gather(
-                *asyncio.all_tasks() - {asyncio.current_task()}, return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, ClientResponseError) and result.status == 412:
-                    print("limit exceeded")
-                    print("total: %s" % TTL)
-                    return
-                else:
-                    await save_result(result)
-                TTL += 1
-            chunk += 1
-    print("total: %s" % TTL)
+async def main(from_rid: int, to_rid: int, frequency: int):
+    async with aiosqlite.connect("medal.db") as db:
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS medals (
+            room_id INTEGER PRIMARY KEY,
+            short_id INTEGER,
+            uid INTEGER,
+            medal_name TEXT
+            )"""
+        )
+        await db.commit()
+
+        TTL = 0
+        sem = asyncio.Semaphore(frequency)
+        async with aiohttp.ClientSession(
+            json_serialize=dumps, headers=HEADERS
+        ) as session:
+            total_num = to_rid - from_rid + 1
+            chunk_num = math.ceil(total_num / chunk_size)
+            chunk = 0
+            while chunk < chunk_num:
+                for rid in range(from_rid + chunk, to_rid + 1, chunk_num):
+                    asyncio.create_task(get_medal(sem, session, rid))
+                    # print(rid)
+                results = await asyncio.gather(
+                    *asyncio.all_tasks() - {asyncio.current_task()},
+                    return_exceptions=True,
+                )
+                for result in results:
+                    if isinstance(result, ClientResponseError) and result.status == 412:
+                        print("limit exceeded")
+                        print("total: %s" % TTL)
+                        return
+                    else:
+                        asyncio.create_task(save_result(db, result))
+                    TTL += 1
+                await asyncio.gather(
+                    *asyncio.all_tasks() - {asyncio.current_task()},
+                )
+                await db.commit()
+                chunk += 1
+        print("total: %s" % TTL)
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("from_rid", type=int)
 parser.add_argument("to_rid", type=int)
+parser.add_argument("-f", action="store", type=int, default=10)
 
 if __name__ == "__main__":
     args = parser.parse_args()
     start_time = time.time()
-    asyncio.run(main(args.from_rid, args.to_rid))
+    asyncio.run(main(args.from_rid, args.to_rid, args.f))
     print(" %.2f seconds" % (time.time() - start_time))
