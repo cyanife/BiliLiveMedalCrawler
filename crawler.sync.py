@@ -112,6 +112,7 @@ def main(from_rid: int, to_rid: int, delay: float):
     with requests.Session() as s:
         try:
             for rid in range(from_rid, to_rid + 1):
+                print(rid)
                 result = get_medal(s, rid, delay)
                 save_result(con, result)
 
