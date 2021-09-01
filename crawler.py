@@ -38,20 +38,24 @@ class Medal(TypedDict):
 
 
 async def fetch(
-    sem: Semaphore, session: aiohttp.ClientSession, url: str, params: dict[str, str]
+    sem: Semaphore,
+    session: aiohttp.ClientSession,
+    url: str,
+    params: dict[str, str],
+    delay: float,
 ) -> dict:
     async with sem:
-        await asyncio.sleep(1)
+        await asyncio.sleep(delay)
         async with session.get(url, params=params) as resp:
             resp.raise_for_status()
             return await resp.json(loads=loads)
 
 
 async def get_room_info(
-    sem: Semaphore, session: aiohttp.ClientSession, rid: int
+    sem: Semaphore, session: aiohttp.ClientSession, rid: int, delay: float
 ) -> Tuple[int, int, int]:
     params = {"id": str(rid)}
-    ret = await fetch(sem, session, ROOM_INFO_API, params=params)
+    ret = await fetch(sem, session, ROOM_INFO_API, params, delay)
     # print(ret)
     code = ret.get("code", -1)
     if code == 0:
@@ -64,25 +68,28 @@ async def get_room_info(
     return None, None, None
 
 
-async def get_medal(sem: Semaphore, session: aiohttp.ClientSession, rid: int) -> Medal:
-    room_id, short_id, uid = await get_room_info(sem, session, rid)
+async def get_medal(
+    sem: Semaphore, session: aiohttp.ClientSession, rid: int, delay: float
+) -> Medal:
+    room_id, short_id, uid = await get_room_info(sem, session, rid, delay)
     if uid:
         params = {"uid": str(uid)}
-        ret = await fetch(sem, session, LIVE_USER_API, params=params)
+        ret = await fetch(sem, session, LIVE_USER_API, params, 0)
         # print(ret)
         code = ret.get("code", -1)
         if code == 0:
             data = ret.get("data", None)
             # print(rid)
             if data:
-                medal_name = data.get("medal_name", "")
+                medal_name = data.get("medal_name", None)
                 # print(data.get("medal_name", ""))
-                return Medal(
-                    room_id=room_id,
-                    short_id=short_id,
-                    uid=uid,
-                    medal_name=medal_name,
-                )
+                if medal_name:
+                    return Medal(
+                        room_id=room_id,
+                        short_id=short_id,
+                        uid=uid,
+                        medal_name=medal_name,
+                    )
     return None
 
 
@@ -102,7 +109,7 @@ async def save_result(db: Connection, result: Medal):
     #     print(result)
 
 
-async def main(from_rid: int, to_rid: int, frequency: int):
+async def main(from_rid: int, to_rid: int, frequency: int, delay: float):
     async with aiosqlite.connect("medal.db") as db:
         await db.execute(
             """CREATE TABLE IF NOT EXISTS medals (
@@ -124,7 +131,7 @@ async def main(from_rid: int, to_rid: int, frequency: int):
             chunk = 0
             while chunk < chunk_num:
                 for rid in range(from_rid + chunk, to_rid + 1, chunk_num):
-                    asyncio.create_task(get_medal(sem, session, rid))
+                    asyncio.create_task(get_medal(sem, session, rid, delay))
                     # print(rid)
                 results = await asyncio.gather(
                     *asyncio.all_tasks() - {asyncio.current_task()},
@@ -150,9 +157,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("from_rid", type=int)
 parser.add_argument("to_rid", type=int)
 parser.add_argument("-f", action="store", type=int, default=10)
+parser.add_argument("-d", action="store", type=float, default=0.1)
 
 if __name__ == "__main__":
     args = parser.parse_args()
     start_time = time.time()
-    asyncio.run(main(args.from_rid, args.to_rid, args.f))
+    asyncio.run(main(args.from_rid, args.to_rid, args.f, args.d))
     print(" %.2f seconds" % (time.time() - start_time))
