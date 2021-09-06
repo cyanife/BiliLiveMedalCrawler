@@ -127,11 +127,13 @@ def main(from_rid: int, to_rid: int):
             except HTTPError as e:
                 if e.response.status_code == 412:
                     print("limit exceeded")
+                    print(f"end at {rid}")
                     break
                 else:
                     print(str(e))
                     continue
             except:
+                print(f"end at {rid}")
                 print("total: %s" % (rid - from_rid))
                 raise
 
