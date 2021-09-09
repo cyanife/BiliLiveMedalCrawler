@@ -142,8 +142,8 @@ async def fetch_proxy(
     proxy: Proxy,
 ) -> dict:
     print(params)
-    # async with session.get(url, params=params, proxy=proxy.url) as resp:
-    async with session.get(url, params=params) as resp:
+    async with session.get(url, params=params, proxy=proxy.url) as resp:
+        # async with session.get(url, params=params) as resp:
         json = await resp.json(loads=loads)
         # print(json)
         return json
