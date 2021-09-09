@@ -320,7 +320,7 @@ async def main(
         )
 
         proxies = asyncio.PriorityQueue(maxsize=concurrency * 2)
-        jobs = asyncio.PriorityQueue(maxsize=concurrency * 2)
+        jobs = asyncio.PriorityQueue(maxsize=concurrency)
 
         tasks = []
 
