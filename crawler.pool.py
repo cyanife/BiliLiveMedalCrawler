@@ -7,6 +7,7 @@ from typing import Tuple, TypedDict
 
 import aiohttp
 import aiosqlite
+import toml
 import uvloop
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from aiosqlite.core import Connection
@@ -19,8 +20,6 @@ uvloop.install()
 LIVE_USER_API = "http://api.live.bilibili.com/live_user/v1/Master/info"
 # param: uid=x
 ROOM_INIT_API = "http://api.live.bilibili.com/room/v1/Room/room_init"
-
-PROXY_API = ""
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36",
@@ -72,9 +71,6 @@ class Proxy:
     def punish_connectError(self):
         self._score -= 2
 
-    def drop(self):
-        self._score -= 3
-
     def __str__(self) -> str:
         return f"[{self._host}:{self._port}]"
 
@@ -106,6 +102,14 @@ class Job:
 async def fetch(
     session: aiohttp.ClientSession,
     url: str,
+) -> dict:
+    async with session.get(url) as resp:
+        return await resp.json(loads=loads)
+
+
+async def fetch_proxy(
+    session: aiohttp.ClientSession,
+    url: str,
     params: dict[str, str],
     proxy: Proxy,
 ) -> dict:
@@ -117,7 +121,7 @@ async def get_room_info(
     session: aiohttp.ClientSession, rid: int, proxy: Proxy
 ) -> Tuple[int, int, int]:
     params = {"id": str(rid)}
-    ret = await fetch(session, ROOM_INIT_API, params, proxy)
+    ret = await fetch_proxy(session, ROOM_INIT_API, params, proxy)
     # print(ret)
     code = ret.get("code", -1)
     if code == 0:
@@ -134,7 +138,7 @@ async def get_room_info(
 async def get_medal(session: aiohttp.ClientSession, rid: int, proxy: Proxy) -> Medal:
     room_id, short_id, uid = await get_room_info(session, rid, proxy)
     params = {"uid": str(uid)}
-    ret = await fetch(session, LIVE_USER_API, params, proxy)
+    ret = await fetch_proxy(session, LIVE_USER_API, params, proxy)
     # print(ret)
     code = ret.get("code", -1)
     if code == 0:
@@ -156,7 +160,9 @@ async def get_medal(session: aiohttp.ClientSession, rid: int, proxy: Proxy) -> M
 
 async def save_result(conn: Connection, result: Medal):
     if isinstance(result, dict):
-        print(f'room_id: {result["room_id"]}, medal: {result["medal_name"]}')
+        print(
+            f'sid: {result["short_id"]}, room_id: {result["room_id"]}, medal: {result["medal_name"]}'
+        )
         await conn.execute(
             "INSERT OR IGNORE INTO medals VALUES (?, ?, ?, ?)",
             (
@@ -169,31 +175,32 @@ async def save_result(conn: Connection, result: Medal):
         await conn.commit()
 
 
-async def consumer(
+async def worker(
     sem: asyncio.Semaphore,
     session: aiohttp.ClientSession,
     conn: Connection,
-    proxys: asyncio.PriorityQueue[Proxy],
+    proxies: asyncio.PriorityQueue[Proxy],
     jobs: asyncio.Queue[Job],
 ):
     while True:
         async with sem:
-            proxy = await proxys.get()
+            proxy = await proxies.get()
             job = await jobs.get()
             try:
                 if job.exhausted:
                     print(f"Job failed. rid: {job.rid}")
-                    await proxys.put(proxy)
+                    await proxies.put(proxy)
                 else:
                     medal = await get_medal(session, job.rid, proxy)
                     await save_result(conn, medal)
+                await proxies.put(proxy)
             except TimeoutError:
                 proxy.punish_timeout()
-                await proxys.put(proxy)
+                await proxies.put(proxy)
                 await jobs.put(job)
             except ClientConnectionError:
                 proxy.punish_connectError()
-                await proxys.put(proxy)
+                await proxies.put(proxy)
                 await jobs.put(job)
             except ClientResponseError as e:
                 if e.status == 412:
@@ -202,28 +209,39 @@ async def consumer(
                 else:
                     job.fail()
                     await jobs.put(job)
-                    await proxys.put(proxy)
+                    await proxies.put(proxy)
             finally:
-                proxys.task_done()
+                proxies.task_done()
                 jobs.task_done()
 
 
-async def get_proxy(
+async def get_proxies(
     session: aiohttp.ClientSession,
-    proxys: asyncio.PriorityQueue[Proxy],
+    proxies: asyncio.PriorityQueue[Proxy],
+    api: str,
+    frequency: int,
 ):
     while True:
-        proxy_res = await fetch(session, PROXY_API, None, None)
-        code = proxy_res.get("code")
-        if code == 0:
-            data = proxy_res.get("data")
-            for proxy_data in data:
-                proxy = Proxy(proxy_data["host"], proxy_data["port"])
-                await proxys.put(proxy)
-        await asyncio.sleep(1)
+        await get_proxy(session, proxies, api)
+        await asyncio.sleep(frequency)
 
 
-async def main(from_rid: int, to_rid: int, concurrency: int):
+async def get_proxy(
+    session: aiohttp.ClientSession, proxies: asyncio.PriorityQueue[Proxy], api: str
+):
+    proxy_res = await fetch(session, api)
+    code = proxy_res.get("code")
+    if code == 0:
+        data = proxy_res.get("data")
+        for proxy_data in data:
+            proxy = Proxy(proxy_data["host"], proxy_data["port"])
+            print(proxy)
+            await proxies.put(proxy)
+
+
+async def main(
+    from_rid: int, to_rid: int, concurrency: int, frequency: int, proxy_api: str
+):
     async with aiosqlite.connect("medal.db") as conn:
         await conn.execute(
             """CREATE TABLE IF NOT EXISTS medals (
@@ -235,13 +253,68 @@ async def main(from_rid: int, to_rid: int, concurrency: int):
         )
         await conn.commit()
 
-    sem = asyncio.Semaphore(concurrency)
-    connector = aiohttp.TCPConnector(
-        verify_ssl=False, limit=concurrency + 1, use_dns_cache=True
-    )
+        sem = asyncio.Semaphore(concurrency)
+        connector = aiohttp.TCPConnector(
+            ssl=False, limit=concurrency + 1, use_dns_cache=True
+        )
 
-    timeout = aiohttp.ClientTimeout(total=1)
-    async with aiohttp.ClientSession(connector=connector,
-        json_serialize=dumps, headers=HEADERS, raise_for_status=True, timeout=timeout
-    ) as session:
-        pass
+        proxies = asyncio.PriorityQueue()
+        jobs = asyncio.Queue(maxsize=concurrency)
+
+        tasks = []
+
+        rid = from_rid
+
+        timeout = aiohttp.ClientTimeout(total=1)
+        async with aiohttp.ClientSession(
+            connector=connector,
+            json_serialize=dumps,
+            headers=HEADERS,
+            raise_for_status=True,
+            timeout=timeout,
+        ) as session:
+
+            try:
+                await get_proxy(session, proxies, proxy_api)
+                tasks.append(
+                    asyncio.create_task(
+                        get_proxies(session, proxies, proxy_api, frequency)
+                    )
+                )
+
+                for i in range(concurrency):
+                    tasks.append(
+                        asyncio.create_task(worker(sem, session, conn, proxies, jobs))
+                    )
+
+                while rid <= to_rid:
+                    while not jobs.full():
+                        if rid <= to_rid:
+                            job = Job(rid)
+                            jobs.put_nowait(job)
+                            rid += 1
+                        else:
+                            break
+                    await jobs.join()
+                    print(f"current:{rid}")
+            except Exception as e:
+                print(str(e))
+                print(f"teminated at {rid}")
+
+            finally:
+                for task in tasks:
+                    task.cancel()
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("from_rid", type=int)
+parser.add_argument("to_rid", type=int)
+parser.add_argument("-c", action="store", type=int, default=200)
+parser.add_argument("-f", action="store", type=int, default=1)
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    proxy_api = toml.load("config.toml")["PROXY_API"]
+    start_time = time.time()
+    asyncio.run(main(args.from_rid, args.to_rid, args.c, args.f, proxy_api))
+    print(" %.2f seconds" % (time.time() - start_time))
