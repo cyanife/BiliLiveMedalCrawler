@@ -260,20 +260,29 @@ async def get_proxies(
     frequency: int,
 ):
     while True:
-        await get_proxy(session, proxies, api)
+        proxy = await get_proxy(session, api)
+        if proxies.qsize() < proxies.maxsize / 2:
+            proxies.put_nowait(proxy)
         await asyncio.sleep(frequency)
 
 
-async def get_proxy(
-    session: aiohttp.ClientSession, proxies: asyncio.PriorityQueue[Proxy], api: str
-):
+# async def get_proxy(session: aiohttp.ClientSession, api: str):
+#     proxy_res = await fetch(session, api)
+#     code = proxy_res.get("code")
+#     if code == 0:
+#         data = proxy_res.get("data")
+#         for proxy_data in data:
+#             proxy = Proxy(proxy_data["host"], proxy_data["port"])
+#             return proxy
+
+
+async def get_proxy(session: aiohttp.ClientSession, api: str):
     proxy_res = await fetch(session, api)
-    code = proxy_res.get("code")
-    if code == 0:
-        data = proxy_res.get("data")
-        for proxy_data in data:
-            proxy = Proxy(proxy_data["host"], proxy_data["port"])
-            await proxies.put(proxy)
+    proxy_str = proxy_res.get("proxy")
+    if proxy_str:
+        proxy_data = proxy_str.split(":")
+        proxy = Proxy(proxy_data[0], proxy_data[1])
+        return proxy
 
 
 async def distributer(
