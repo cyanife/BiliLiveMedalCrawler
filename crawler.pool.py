@@ -239,11 +239,12 @@ async def worker(
                     proxy.punish_connectError()
                     await jobs.put(job)
                 except ClientResponseError as e:
-                    if e.status == 412:
+                    if e.status >= 400 and e.status < 500:  # request error
                         print(f"{str(proxy)} limit exceed.")
                         proxy.discard()
                         await jobs.put(job)
-                    else:
+                    else:  # server internal error
+                        print(e)
                         job.fail()
                         await jobs.put(job)
                 except RoomInitError as e:
@@ -291,7 +292,6 @@ async def get_proxy(session: aiohttp.ClientSession, api: str):
 async def distributer(
     from_rid: int,
     to_rid: int,
-    concurrency: int,
     jobs: asyncio.PriorityQueue[Job],
 ):
     rid = from_rid
