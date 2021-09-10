@@ -355,7 +355,7 @@ async def main(
                 )
 
                 distributer_task = asyncio.create_task(
-                    distributer(from_rid, to_rid, concurrency, jobs)
+                    distributer(from_rid, to_rid, jobs)
                 )
 
                 tasks.append(distributer_task)
