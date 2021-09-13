@@ -1,1 +1,2 @@
 PROXY_API = "https://proxyapi.domain.com/api/v1/foo/bar"
+MODE = "FREE"

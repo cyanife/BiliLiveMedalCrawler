@@ -107,18 +107,10 @@ class Medal(TypedDict):
 class Job:
     def __init__(self, rid: int) -> None:
         self._rid = rid
-        self._limit = 3
 
     @property
     def rid(self) -> int:
         return self._rid
-
-    @property
-    def exhausted(self) -> bool:
-        return self._limit <= 0
-
-    def fail(self):
-        self._limit -= 1
 
     def __lt__(self, other):
         return self.rid < other.rid
@@ -224,13 +216,10 @@ async def worker(
                 proxies.put_nowait(proxy)
                 job = await jobs.get()
                 try:
-                    if job.exhausted:
-                        print(f"Job failed. rid: {job.rid}")
-                    else:
-                        # print(job.rid)
-                        medal = await get_medal(session, job.rid, proxy)
-                        # print(medal)
-                        await save_result(conn, medal)
+                    # print(job.rid)
+                    medal = await get_medal(session, job.rid, proxy)
+                    # print(medal)
+                    await save_result(conn, medal)
                 except asyncio.TimeoutError:
                     # print("timeout")
                     proxy.punish_timeout()
@@ -245,7 +234,6 @@ async def worker(
                         await jobs.put(job)
                     else:  # server internal error
                         print(e)
-                        job.fail()
                         await jobs.put(job)
                 except RoomInitError as e:
                     if e.code != 60004:  # room not exists
@@ -262,25 +250,29 @@ async def get_proxies(
     proxies: asyncio.PriorityQueue[Proxy],
     api: str,
     frequency: int,
+    mode: str,
 ):
     while True:
-        proxy = await get_proxy(session, api)
+        if mode == "FREE":
+            proxy = await get_free_proxy(session, api)
+        elif mode == "HORO":
+            proxy = await get_horo_proxy()
         if proxies.qsize() < proxies.maxsize / 2:
             proxies.put_nowait(proxy)
         await asyncio.sleep(frequency)
 
 
-# async def get_proxy(session: aiohttp.ClientSession, api: str):
-#     proxy_res = await fetch(session, api)
-#     code = proxy_res.get("code")
-#     if code == 0:
-#         data = proxy_res.get("data")
-#         for proxy_data in data:
-#             proxy = Proxy(proxy_data["host"], proxy_data["port"])
-#             return proxy
+async def get_horo_proxy(session: aiohttp.ClientSession, api: str):
+    proxy_res = await fetch(session, api)
+    code = proxy_res.get("code")
+    if code == 0:
+        data = proxy_res.get("data")
+        proxy_data = data[0]
+        proxy = Proxy(proxy_data["host"], proxy_data["port"])
+        return proxy
 
 
-async def get_proxy(session: aiohttp.ClientSession, api: str):
+async def get_free_proxy(session: aiohttp.ClientSession, api: str):
     proxy_res = await fetch(session, api)
     proxy_str = proxy_res.get("proxy")
     if proxy_str:
@@ -313,7 +305,12 @@ async def distributer(
 
 
 async def main(
-    from_rid: int, to_rid: int, concurrency: int, frequency: int, proxy_api: str
+    from_rid: int,
+    to_rid: int,
+    concurrency: int,
+    frequency: int,
+    proxy_api: str,
+    mode: str,
 ):
     async with aiosqlite.connect("medal.db") as conn:
         await conn.execute(
@@ -350,7 +347,7 @@ async def main(
             try:
                 tasks.append(
                     asyncio.create_task(
-                        get_proxies(session, proxies, proxy_api, frequency)
+                        get_proxies(session, proxies, proxy_api, frequency, mode)
                     )
                 )
 
@@ -396,7 +393,9 @@ parser.add_argument("-f", action="store", type=int, default=1)
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    proxy_api = toml.load("config.toml")["PROXY_API"]
+    config = toml.load("config.toml")
+    proxy_api = config["PROXY_API"]
+    mode = config["MODE"]
     start_time = time.time()
-    asyncio.run(main(args.from_rid, args.to_rid, args.c, args.f, proxy_api))
+    asyncio.run(main(args.from_rid, args.to_rid, args.c, args.f, proxy_api, mode))
     print(" %.2f seconds" % (time.time() - start_time))
