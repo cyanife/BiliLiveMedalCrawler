@@ -156,7 +156,7 @@ async def get_room_info(
             short_id = data.get("short_id", None)
             return room_id, short_id, uid
     else:
-        print(ret)
+        # print(ret)
         raise RoomInitError(code, ret.get("msg"))
 
 
@@ -180,7 +180,7 @@ async def get_medal(session: aiohttp.ClientSession, rid: int, proxy: Proxy) -> M
                     medal_name=medal_name,
                 )
     else:
-        print(ret)
+        # print(ret)
         raise LiveUserError(code, ret.get("msg"))
 
 
@@ -223,6 +223,9 @@ async def worker(
                 except asyncio.TimeoutError:
                     # print("timeout")
                     proxy.punish_timeout()
+                    await jobs.put(job)
+                except aiohttp.ContentTypeError:
+                    proxy.discard()
                     await jobs.put(job)
                 except ClientConnectionError:
                     proxy.punish_connectError()
